@@ -51,6 +51,9 @@ qio_channel_tls_bye_complete(void *ioc) "TLS termination complete ioc=%p"
 qio_channel_tls_bye_cancel(void *ioc) "TLS termination cancel ioc=%p"
 qio_channel_tls_credentials_allow(void *ioc) "TLS credentials allow ioc=%p"
 qio_channel_tls_credentials_deny(void *ioc) "TLS credentials deny ioc=%p"
+qio_channel_tls_ktls_setup(void *ioc, int fd, int tx, int rx) "TLS KTLS setup ioc=%p fd=%d tx=%d rx=%d"
+qio_channel_tls_ktls_fastpath(void *ioc, int is_write, size_t bytes) "TLS KTLS fastpath ioc=%p write=%d bytes=%zu"
+
 
 # channel-websock.c
 qio_channel_websock_new_server(void *ioc, void *master) "Websock new client ioc=%p master=%p"

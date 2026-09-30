@@ -46,6 +46,9 @@ struct QIOChannelTLSTestData {
     bool expectClientFail;
     const char *hostname;
     const char *const *wildcards;
+    bool use_tcp;
+    bool disable_ktls;
+    bool expect_ktls;
 };
 
 struct QIOChannelTLSHandshakeData {
@@ -114,14 +117,12 @@ static void test_io_channel_tls(const void *opaque)
     QIOChannelSocket *serverChanSock;
     QAuthZList *auth;
     const char * const *wildcards;
-    int channel[2];
+    int channel[2] = { -1, -1 };
+    QIOChannelSocket *listenSock = NULL;
     struct QIOChannelTLSHandshakeData clientHandshake = { false, false };
     struct QIOChannelTLSHandshakeData serverHandshake = { false, false };
     QIOChannelTest *test;
     GMainContext *mainloop;
-
-    /* We'll use this for our fake client-server connection */
-    g_assert(qemu_socketpair(AF_UNIX, SOCK_STREAM, 0, channel) == 0);
 
 #define CLIENT_CERT_DIR "tests/test-io-channel-tls-client/"
 #define SERVER_CERT_DIR "tests/test-io-channel-tls-server/"
@@ -172,12 +173,48 @@ static void test_io_channel_tls(const void *opaque)
         wildcards++;
     }
 
-    clientChanSock = qio_channel_socket_new_fd(
-        channel[0], &error_abort);
-    g_assert(clientChanSock != NULL);
-    serverChanSock = qio_channel_socket_new_fd(
-        channel[1], &error_abort);
-    g_assert(serverChanSock != NULL);
+    if (data->use_tcp) {
+        SocketAddress *listen_addr = g_new0(SocketAddress, 1);
+        SocketAddress *connect_addr = g_new0(SocketAddress, 1);
+        SocketAddress *laddr;
+
+        listenSock = qio_channel_socket_new();
+        listen_addr->type = SOCKET_ADDRESS_TYPE_INET;
+        listen_addr->u.inet = (InetSocketAddress) {
+            .host = g_strdup("127.0.0.1"),
+            .port = NULL,
+        };
+        qio_channel_socket_listen_sync(listenSock, listen_addr,
+                                       1, &error_abort);
+
+        laddr = qio_channel_socket_get_local_address(listenSock, &error_abort);
+        connect_addr->type = SOCKET_ADDRESS_TYPE_INET;
+        connect_addr->u.inet = (InetSocketAddress) {
+            .host = g_strdup("127.0.0.1"),
+            .port = g_strdup(laddr->u.inet.port),
+        };
+        qapi_free_SocketAddress(laddr);
+
+        clientChanSock = qio_channel_socket_new();
+        qio_channel_socket_connect_sync(clientChanSock, connect_addr,
+                                        &error_abort);
+        qio_channel_set_delay(QIO_CHANNEL(clientChanSock), false);
+
+        qio_channel_wait(QIO_CHANNEL(listenSock), G_IO_IN);
+        serverChanSock = qio_channel_socket_accept(listenSock, &error_abort);
+        g_assert(serverChanSock != NULL);
+
+        qapi_free_SocketAddress(listen_addr);
+        qapi_free_SocketAddress(connect_addr);
+    } else {
+        g_assert(qemu_socketpair(AF_UNIX, SOCK_STREAM, 0, channel) == 0);
+        clientChanSock = qio_channel_socket_new_fd(
+            channel[0], &error_abort);
+        g_assert(clientChanSock != NULL);
+        serverChanSock = qio_channel_socket_new_fd(
+            channel[1], &error_abort);
+        g_assert(serverChanSock != NULL);
+    }
 
     /*
      * We have an evil loop to do the handshake in a single
@@ -197,6 +234,11 @@ static void test_io_channel_tls(const void *opaque)
         QIO_CHANNEL(serverChanSock), serverCreds,
         "channeltlsacl", &error_abort);
     g_assert(serverChanTLS != NULL);
+
+    if (data->disable_ktls) {
+        qio_channel_tls_set_ktls_enabled(clientChanTLS, false);
+        qio_channel_tls_set_ktls_enabled(serverChanTLS, false);
+    }
 
     qio_channel_tls_handshake(clientChanTLS,
                               test_tls_handshake_done,
@@ -223,6 +265,20 @@ static void test_io_channel_tls(const void *opaque)
 
     g_assert(clientHandshake.failed == data->expectClientFail);
     g_assert(serverHandshake.failed == data->expectServerFail);
+
+    if (!clientHandshake.failed && !serverHandshake.failed) {
+        bool c_tx = false, c_rx = false, s_tx = false, s_rx = false;
+        qio_channel_tls_is_ktls_active(clientChanTLS, &c_tx, &c_rx);
+        qio_channel_tls_is_ktls_active(serverChanTLS, &s_tx, &s_rx);
+
+        if (data->expect_ktls) {
+            g_assert(c_tx && c_rx);
+            g_assert(s_tx && s_rx);
+        } else if (data->disable_ktls || !data->use_tcp) {
+            g_assert(!c_tx && !c_rx);
+            g_assert(!s_tx && !s_rx);
+        }
+    }
 
     test = qio_channel_test_new();
     qio_channel_test_run_threads(test, false,
@@ -258,8 +314,15 @@ static void test_io_channel_tls(const void *opaque)
 
     object_unparent(OBJECT(auth));
 
-    close(channel[0]);
-    close(channel[1]);
+    if (listenSock) {
+        object_unref(OBJECT(listenSock));
+    }
+    if (channel[0] != -1) {
+        close(channel[0]);
+    }
+    if (channel[1] != -1) {
+        close(channel[1]);
+    }
 }
 
 
@@ -284,7 +347,20 @@ int main(int argc, char **argv)
     struct QIOChannelTLSTestData name = {                               \
         caCrt, caCrt, serverCrt, clientCrt,                             \
         expectServerFail, expectClientFail,                             \
-        hostname, wildcards                                             \
+        hostname, wildcards, false, false, false                        \
+    };                                                                  \
+    g_test_add_data_func("/qio/channel/tls/" # name,                    \
+                         &name, test_io_channel_tls);
+
+# define TEST_CHANNEL_KTLS(name, caCrt,                                 \
+                           serverCrt, clientCrt,                        \
+                           expectServerFail, expectClientFail,          \
+                           hostname, wildcards,                         \
+                           disableKtls, expectKtls)                     \
+    struct QIOChannelTLSTestData name = {                               \
+        caCrt, caCrt, serverCrt, clientCrt,                             \
+        expectServerFail, expectClientFail,                             \
+        hostname, wildcards, true, disableKtls, expectKtls              \
     };                                                                  \
     g_test_add_data_func("/qio/channel/tls/" # name,                    \
                          &name, test_io_channel_tls);
@@ -320,6 +396,14 @@ int main(int argc, char **argv)
     TEST_CHANNEL(basic, cacertreq.filename, servercertreq.filename,
                  clientcertreq.filename, false, false,
                  "qemu.org", wildcards);
+
+    TEST_CHANNEL_KTLS(ktls_tcp, cacertreq.filename, servercertreq.filename,
+                      clientcertreq.filename, false, false,
+                      "qemu.org", wildcards, false, true);
+
+    TEST_CHANNEL_KTLS(ktls_disabled, cacertreq.filename, servercertreq.filename,
+                      clientcertreq.filename, false, false,
+                      "qemu.org", wildcards, true, false);
 
     ret = g_test_run();
 

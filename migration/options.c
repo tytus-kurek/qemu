@@ -86,6 +86,7 @@
 #define DEFAULT_MIGRATE_ANNOUNCE_MAX     550
 #define DEFAULT_MIGRATE_ANNOUNCE_ROUNDS    5
 #define DEFAULT_MIGRATE_ANNOUNCE_STEP    100
+#define DEFAULT_MIGRATE_TLS_KTLS        true
 
 #define DEFINE_PROP_MIG_CAP(name, x)             \
     DEFINE_PROP_BOOL(name, MigrationState, capabilities[x], false)
@@ -181,6 +182,8 @@ const Property migration_properties[] = {
     DEFINE_PROP_STR_OR_NULL("tls-hostname", MigrationState,
                             parameters.tls_hostname),
     DEFINE_PROP_STR_OR_NULL("tls-authz", MigrationState, parameters.tls_authz),
+    DEFINE_PROP_BOOL("tls-ktls", MigrationState, parameters.tls_ktls,
+                     DEFAULT_MIGRATE_TLS_KTLS),
     DEFINE_PROP_UINT64("x-vcpu-dirty-limit-period", MigrationState,
                        parameters.x_vcpu_dirty_limit_period,
                        DEFAULT_MIGRATE_VCPU_DIRTY_LIMIT_PERIOD),
@@ -1022,6 +1025,13 @@ bool migrate_tls(void)
     return !!migrate_tls_creds();
 }
 
+bool migrate_tls_ktls(void)
+{
+    MigrationState *s = migrate_get_current();
+
+    return s->parameters.tls_ktls;
+}
+
 uint64_t migrate_vcpu_dirty_limit_period(void)
 {
     MigrationState *s = migrate_get_current();
@@ -1147,6 +1157,7 @@ static void migrate_mark_all_params_present(MigrationParameters *p)
         &p->has_x_vcpu_dirty_limit_period, &p->has_vcpu_dirty_limit,
         &p->has_mode, &p->has_zero_page_detection, &p->has_direct_io,
         &p->has_x_rdma_chunk_size, &p->has_cpr_exec_command, &p->has_local,
+        &p->has_tls_ktls,
     };
 
     len = ARRAY_SIZE(has_fields);

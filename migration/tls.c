@@ -85,6 +85,7 @@ void migration_tls_channel_process_incoming(QIOChannel *ioc, Error **errp)
     if (!tioc) {
         return;
     }
+    qio_channel_tls_set_ktls_enabled(tioc, migrate_tls_ktls());
 
     trace_migration_tls_incoming_handshake_start();
     qio_channel_set_name(QIO_CHANNEL(tioc), "migration-tls-incoming");
@@ -121,13 +122,18 @@ QIOChannelTLS *migration_tls_client_create(QIOChannel *ioc,
                                            Error **errp)
 {
     QCryptoTLSCreds *creds;
+    QIOChannelTLS *tioc;
 
     creds = migration_tls_get_creds(QCRYPTO_TLS_CREDS_ENDPOINT_CLIENT, errp);
     if (!creds) {
         return NULL;
     }
 
-    return qio_channel_tls_new_client(ioc, creds, migrate_tls_hostname(), errp);
+    tioc = qio_channel_tls_new_client(ioc, creds, migrate_tls_hostname(), errp);
+    if (tioc) {
+        qio_channel_tls_set_ktls_enabled(tioc, migrate_tls_ktls());
+    }
+    return tioc;
 }
 
 void migration_tls_channel_connect(MigrationState *s, QIOChannel *ioc,
