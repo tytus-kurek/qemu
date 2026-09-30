@@ -22,6 +22,7 @@
 #include "qemu/error-report.h"
 #include "qemu/thread.h"
 #include "crypto/tlssession.h"
+#include "crypto/ktls-linux.h"
 #include "crypto/tlscredsanon.h"
 #include "crypto/tlscredspsk.h"
 #include "crypto/tlscredsx509.h"
@@ -654,6 +655,186 @@ qcrypto_tls_session_get_peer_name(QCryptoTLSSession *session)
 }
 
 
+#if defined(__linux__)
+static int
+qcrypto_tls_session_setup_ktls_dir(QCryptoTLSSession *session,
+                                   int fd,
+                                   bool is_rx,
+                                   gnutls_cipher_algorithm_t cipher,
+                                   gnutls_protocol_t version)
+{
+    gnutls_datum_t mac_key = {0}, iv = {0}, cipher_key = {0};
+    unsigned char seq_number[8] = {0};
+    int ret;
+    int optname = is_rx ? TLS_RX : TLS_TX;
+
+    ret = gnutls_record_get_state(session->handle, is_rx ? 1 : 0,
+                                  &mac_key, &iv, &cipher_key, seq_number);
+    if (ret < 0) {
+        return -1;
+    }
+
+    switch (cipher) {
+    case GNUTLS_CIPHER_AES_128_GCM: {
+        struct tls12_crypto_info_aes_gcm_128 info;
+        memset(&info, 0, sizeof(info));
+        info.info.cipher_type = TLS_CIPHER_AES_GCM_128;
+        info.info.version = (version == GNUTLS_TLS1_2) ?
+            TLS_1_2_VERSION : TLS_1_3_VERSION;
+
+        if (version == GNUTLS_TLS1_2) {
+            memcpy(info.iv, seq_number, TLS_CIPHER_AES_GCM_128_IV_SIZE);
+        } else {
+            if (iv.size < TLS_CIPHER_AES_GCM_128_SALT_SIZE +
+                          TLS_CIPHER_AES_GCM_128_IV_SIZE) {
+                return -1;
+            }
+            memcpy(info.iv, iv.data + TLS_CIPHER_AES_GCM_128_SALT_SIZE,
+                   TLS_CIPHER_AES_GCM_128_IV_SIZE);
+        }
+        if (iv.size < TLS_CIPHER_AES_GCM_128_SALT_SIZE ||
+            cipher_key.size < TLS_CIPHER_AES_GCM_128_KEY_SIZE) {
+            return -1;
+        }
+        memcpy(info.salt, iv.data, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
+        memcpy(info.rec_seq, seq_number,
+               TLS_CIPHER_AES_GCM_128_REC_SEQ_SIZE);
+        memcpy(info.key, cipher_key.data,
+               TLS_CIPHER_AES_GCM_128_KEY_SIZE);
+
+        if (setsockopt(fd, SOL_TLS, optname, &info, sizeof(info)) < 0) {
+            return -1;
+        }
+        return 0;
+    }
+    case GNUTLS_CIPHER_AES_256_GCM: {
+        struct tls12_crypto_info_aes_gcm_256 info;
+        memset(&info, 0, sizeof(info));
+        info.info.cipher_type = TLS_CIPHER_AES_GCM_256;
+        info.info.version = (version == GNUTLS_TLS1_2) ?
+            TLS_1_2_VERSION : TLS_1_3_VERSION;
+
+        if (version == GNUTLS_TLS1_2) {
+            memcpy(info.iv, seq_number, TLS_CIPHER_AES_GCM_256_IV_SIZE);
+        } else {
+            if (iv.size < TLS_CIPHER_AES_GCM_256_SALT_SIZE +
+                          TLS_CIPHER_AES_GCM_256_IV_SIZE) {
+                return -1;
+            }
+            memcpy(info.iv, iv.data + TLS_CIPHER_AES_GCM_256_SALT_SIZE,
+                   TLS_CIPHER_AES_GCM_256_IV_SIZE);
+        }
+        if (iv.size < TLS_CIPHER_AES_GCM_256_SALT_SIZE ||
+            cipher_key.size < TLS_CIPHER_AES_GCM_256_KEY_SIZE) {
+            return -1;
+        }
+        memcpy(info.salt, iv.data, TLS_CIPHER_AES_GCM_256_SALT_SIZE);
+        memcpy(info.rec_seq, seq_number,
+               TLS_CIPHER_AES_GCM_256_REC_SEQ_SIZE);
+        memcpy(info.key, cipher_key.data,
+               TLS_CIPHER_AES_GCM_256_KEY_SIZE);
+
+        if (setsockopt(fd, SOL_TLS, optname, &info, sizeof(info)) < 0) {
+            return -1;
+        }
+        return 0;
+    }
+    case GNUTLS_CIPHER_CHACHA20_POLY1305: {
+        struct tls12_crypto_info_chacha20_poly1305 info;
+        memset(&info, 0, sizeof(info));
+        info.info.cipher_type = TLS_CIPHER_CHACHA20_POLY1305;
+        info.info.version = (version == GNUTLS_TLS1_2) ?
+            TLS_1_2_VERSION : TLS_1_3_VERSION;
+
+        if (iv.size < TLS_CIPHER_CHACHA20_POLY1305_IV_SIZE ||
+            cipher_key.size < TLS_CIPHER_CHACHA20_POLY1305_KEY_SIZE) {
+            return -1;
+        }
+        memcpy(info.iv, iv.data, TLS_CIPHER_CHACHA20_POLY1305_IV_SIZE);
+        memcpy(info.rec_seq, seq_number,
+               TLS_CIPHER_CHACHA20_POLY1305_REC_SEQ_SIZE);
+        memcpy(info.key, cipher_key.data,
+               TLS_CIPHER_CHACHA20_POLY1305_KEY_SIZE);
+
+        if (setsockopt(fd, SOL_TLS, optname, &info, sizeof(info)) < 0) {
+            return -1;
+        }
+        return 0;
+    }
+    default:
+        return -1;
+    }
+}
+#endif
+
+int
+qcrypto_tls_session_setup_ktls(QCryptoTLSSession *session,
+                               int fd,
+                               int direction,
+                               Error **errp)
+{
+#if defined(__linux__)
+    gnutls_cipher_algorithm_t cipher;
+    gnutls_protocol_t version;
+    int enabled = 0;
+
+    if (!session || !session->handle || !session->handshakeComplete) {
+        trace_qcrypto_tls_session_ktls_fail(session, fd, "session not ready");
+        return 0;
+    }
+
+    cipher = gnutls_cipher_get(session->handle);
+    version = gnutls_protocol_get_version(session->handle);
+
+    if (version != GNUTLS_TLS1_2 && version != GNUTLS_TLS1_3) {
+        trace_qcrypto_tls_session_ktls_fail(session, fd,
+                                            "unsupported TLS version");
+        return 0;
+    }
+
+    if (cipher != GNUTLS_CIPHER_AES_128_GCM &&
+        cipher != GNUTLS_CIPHER_AES_256_GCM &&
+        cipher != GNUTLS_CIPHER_CHACHA20_POLY1305) {
+        trace_qcrypto_tls_session_ktls_fail(session, fd, "unsupported cipher");
+        return 0;
+    }
+
+    if (setsockopt(fd, SOL_TCP, TCP_ULP, "tls", sizeof("tls")) < 0) {
+        if (errno != EEXIST) {
+            trace_qcrypto_tls_session_ktls_fail(session, fd,
+                                                "TCP_ULP tls setsockopt fail");
+            return 0;
+        }
+    }
+
+    if ((direction & QCRYPTO_TLS_KTLS_TX) &&
+        qcrypto_tls_session_setup_ktls_dir(session, fd, false,
+                                           cipher, version) == 0) {
+        enabled |= QCRYPTO_TLS_KTLS_TX;
+    }
+
+    if ((direction & QCRYPTO_TLS_KTLS_RX) &&
+        qcrypto_tls_session_setup_ktls_dir(session, fd, true,
+                                           cipher, version) == 0) {
+        enabled |= QCRYPTO_TLS_KTLS_RX;
+    }
+
+    if (enabled) {
+        trace_qcrypto_tls_session_ktls_enable(session, fd, enabled);
+    } else {
+        trace_qcrypto_tls_session_ktls_fail(session, fd,
+                                            "SOL_TLS setsockopt failed");
+    }
+
+    return enabled;
+#else
+    trace_qcrypto_tls_session_ktls_fail(session, fd,
+                                        "KTLS not supported on platform");
+    return 0;
+#endif
+}
+
+
 #else /* ! CONFIG_GNUTLS */
 
 
@@ -755,6 +936,15 @@ char *
 qcrypto_tls_session_get_peer_name(QCryptoTLSSession *sess)
 {
     return NULL;
+}
+
+int
+qcrypto_tls_session_setup_ktls(QCryptoTLSSession *session G_GNUC_UNUSED,
+                               int fd G_GNUC_UNUSED,
+                               int direction G_GNUC_UNUSED,
+                               Error **errp G_GNUC_UNUSED)
+{
+    return 0;
 }
 
 #endif

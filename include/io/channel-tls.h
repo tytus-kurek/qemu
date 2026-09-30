@@ -50,6 +50,9 @@ struct QIOChannelTLS {
     QIOChannelShutdown shutdown;
     guint hs_ioc_tag;
     guint bye_ioc_tag;
+    bool ktls_tx;
+    bool ktls_rx;
+    bool ktls_enabled;
 };
 
 /**
@@ -154,5 +157,28 @@ void qio_channel_tls_handshake(QIOChannelTLS *ioc,
  */
 QCryptoTLSSession *
 qio_channel_tls_get_session(QIOChannelTLS *ioc);
+
+/**
+ * qio_channel_tls_is_ktls_active:
+ * @ioc: the TLS channel object
+ * @tx: pointer to bool to receive TX KTLS status (or NULL)
+ * @rx: pointer to bool to receive RX KTLS status (or NULL)
+ *
+ * Query whether KTLS offload is currently active on the channel.
+ */
+void qio_channel_tls_is_ktls_active(QIOChannelTLS *ioc,
+                                    bool *tx,
+                                    bool *rx);
+
+/**
+ * qio_channel_tls_set_ktls_enabled:
+ * @ioc: the TLS channel object
+ * @enabled: whether to attempt KTLS offload
+ *
+ * Enable or disable attempting Kernel TLS (KTLS) offload for this channel.
+ * Must be configured prior to handshake completion.
+ */
+void qio_channel_tls_set_ktls_enabled(QIOChannelTLS *ioc,
+                                      bool enabled);
 
 #endif /* QIO_CHANNEL_TLS_H */

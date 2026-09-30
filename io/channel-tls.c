@@ -22,6 +22,7 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "io/channel-tls.h"
+#include "io/channel-socket.h"
 #include "trace.h"
 #include "qemu/atomic.h"
 
@@ -176,6 +177,39 @@ static gboolean qio_channel_tls_handshake_io(QIOChannel *ioc,
                                              GIOCondition condition,
                                              gpointer user_data);
 
+static void qio_channel_tls_setup_ktls(QIOChannelTLS *ioc)
+{
+    QIOChannelSocket *sioc;
+    int res;
+
+    if (!ioc->ktls_enabled) {
+        return;
+    }
+
+    sioc = (QIOChannelSocket *)object_dynamic_cast(OBJECT(ioc->master),
+                                                   TYPE_QIO_CHANNEL_SOCKET);
+    if (!sioc) {
+        return;
+    }
+
+    res = qcrypto_tls_session_setup_ktls(
+        ioc->session,
+        sioc->fd,
+        QCRYPTO_TLS_KTLS_TX | QCRYPTO_TLS_KTLS_RX,
+        NULL);
+    if (res & QCRYPTO_TLS_KTLS_TX) {
+        ioc->ktls_tx = true;
+    }
+    if (res & QCRYPTO_TLS_KTLS_RX) {
+        ioc->ktls_rx = true;
+    }
+
+    if (ioc->ktls_tx || ioc->ktls_rx) {
+        trace_qio_channel_tls_ktls_setup(ioc, sioc->fd,
+                                         ioc->ktls_tx, ioc->ktls_rx);
+    }
+}
+
 static gboolean qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
                                                QIOTask *task,
                                                GMainContext *context)
@@ -200,6 +234,7 @@ static gboolean qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
             qio_task_set_error(task, err);
         } else {
             trace_qio_channel_tls_credentials_allow(ioc);
+            qio_channel_tls_setup_ktls(ioc);
         }
         qio_task_complete(task);
         return TRUE;
@@ -357,8 +392,11 @@ void qio_channel_tls_bye(QIOChannelTLS *ioc, Error **errp)
     }
 }
 
-static void qio_channel_tls_init(Object *obj G_GNUC_UNUSED)
+static void qio_channel_tls_init(Object *obj)
 {
+    QIOChannelTLS *ioc = QIO_CHANNEL_TLS(obj);
+
+    ioc->ktls_enabled = true;
 }
 
 
@@ -407,6 +445,15 @@ static ssize_t qio_channel_tls_readv(QIOChannel *ioc,
     size_t i;
     ssize_t got = 0;
 
+    if (tioc->ktls_rx) {
+        ssize_t ret = qio_channel_readv_full(tioc->master, iov, niov,
+                                             fds, nfds, flags, errp);
+        if (ret > 0) {
+            trace_qio_channel_tls_ktls_fastpath(ioc, 0, (size_t)ret);
+        }
+        return ret;
+    }
+
     for (i = 0 ; i < niov ; i++) {
         ssize_t ret = qcrypto_tls_session_read(
             tioc->session,
@@ -448,6 +495,15 @@ static ssize_t qio_channel_tls_writev(QIOChannel *ioc,
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(ioc);
     size_t i;
     ssize_t done = 0;
+
+    if (tioc->ktls_tx) {
+        ssize_t ret = qio_channel_writev_full(tioc->master, iov, niov,
+                                              fds, nfds, flags, errp);
+        if (ret > 0) {
+            trace_qio_channel_tls_ktls_fastpath(ioc, 1, (size_t)ret);
+        }
+        return ret;
+    }
 
     for (i = 0 ; i < niov ; i++) {
         ssize_t ret = qcrypto_tls_session_write(tioc->session,
@@ -615,6 +671,28 @@ QCryptoTLSSession *
 qio_channel_tls_get_session(QIOChannelTLS *ioc)
 {
     return ioc->session;
+}
+
+void
+qio_channel_tls_is_ktls_active(QIOChannelTLS *ioc,
+                               bool *tx,
+                               bool *rx)
+{
+    if (tx) {
+        *tx = ioc ? ioc->ktls_tx : false;
+    }
+    if (rx) {
+        *rx = ioc ? ioc->ktls_rx : false;
+    }
+}
+
+void
+qio_channel_tls_set_ktls_enabled(QIOChannelTLS *ioc,
+                                 bool enabled)
+{
+    if (ioc) {
+        ioc->ktls_enabled = enabled;
+    }
 }
 
 static void qio_channel_tls_class_init(ObjectClass *klass,

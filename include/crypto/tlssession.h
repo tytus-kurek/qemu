@@ -369,4 +369,28 @@ int qcrypto_tls_session_get_key_size(QCryptoTLSSession *sess,
  */
 char *qcrypto_tls_session_get_peer_name(QCryptoTLSSession *sess);
 
+typedef enum {
+    QCRYPTO_TLS_KTLS_TX = (1 << 0),
+    QCRYPTO_TLS_KTLS_RX = (1 << 1),
+} QCryptoTLSKTLSDirection;
+
+/**
+ * qcrypto_tls_session_setup_ktls:
+ * @session: the TLS session object
+ * @fd: the underlying socket file descriptor
+ * @direction: bitmask of QCryptoTLSKTLSDirection (TX, RX, or both)
+ * @errp: pointer to a NULL-initialized error object
+ *
+ * Attempt to configure Kernel TLS (KTLS) offload on the socket @fd
+ * using cryptographic state from the established TLS session.
+ *
+ * Returns: bitmask of successfully enabled directions (e.g.
+ * QCRYPTO_TLS_KTLS_TX | QCRYPTO_TLS_KTLS_RX), or 0 if KTLS could not be
+ * enabled (fallback to userspace TLS).
+ */
+int qcrypto_tls_session_setup_ktls(QCryptoTLSSession *session,
+                                   int fd,
+                                   int direction,
+                                   Error **errp);
+
 #endif /* QCRYPTO_TLSSESSION_H */

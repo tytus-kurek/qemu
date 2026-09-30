@@ -831,7 +831,8 @@
            'direct-io',
            { 'name': 'x-rdma-chunk-size', 'features': [ 'unstable' ] },
            'cpr-exec-command',
-           { 'name': 'local', 'features': [ 'unstable' ] } ] }
+           { 'name': 'local', 'features': [ 'unstable' ] },
+           'tls-ktls' ] }
 
 ##
 # @migrate-set-parameters:
@@ -1023,6 +1024,10 @@
 #     local migration optimizations.  This will be documented against
 #     the device backends where it applies.  (Since 11.2)
 #
+# @tls-ktls: Whether to enable Kernel TLS (KTLS) offload for TLS
+#     migration channels when supported by the host kernel.
+#     Defaults to true.  (Since 11.1)
+#
 # Features:
 #
 # @unstable: Members @local, @x-checkpoint-delay, @x-rdma-chunk-size,
@@ -1066,7 +1071,8 @@
                                     'features': [ 'unstable' ] },
             '*cpr-exec-command': [ 'str' ],
             '*local': { 'type': 'bool',
-                        'features': [ 'unstable' ] } } }
+                        'features': [ 'unstable' ] },
+            '*tls-ktls': 'bool' } }
 
 ##
 # @query-migrate-parameters:

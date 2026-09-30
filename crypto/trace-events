@@ -24,6 +24,8 @@ qcrypto_tls_session_check_creds(void *session, const char *status) "TLS session 
 qcrypto_tls_session_check_x509_dn(void *session, const char *dname) "TLS session check x509 distinguished name session=%p dname=%s"
 qcrypto_tls_session_parameters(void *session, int threadSafety, int protocol, int cipher) "TLS session parameters session=%p threadSafety=%d protocol=%d cipher=%d"
 qcrypto_tls_session_bug1717_workaround(void *session) "TLS session bug1717 workaround session=%p"
+qcrypto_tls_session_ktls_enable(void *session, int fd, int direction) "TLS session ktls enable session=%p fd=%d direction=%d"
+qcrypto_tls_session_ktls_fail(void *session, int fd, const char *reason) "TLS session ktls fail session=%p fd=%d reason=%s"
 
 # tls-cipher-suites.c
 qcrypto_tls_cipher_suite_priority(const char *name) "priority: %s"
