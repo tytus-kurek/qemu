@@ -1,171 +1,203 @@
-===========
-QEMU README
-===========
+==============================================
+QEMU with Kernel TLS (KTLS) Offload Support
+==============================================
 
-QEMU is a generic and open source machine & userspace emulator and
-virtualizer.
+This repository is an experimental fork of `QEMU <https://github.com/qemu/qemu>`_
+maintained for prototyping, evaluating, and benchmarking **Kernel TLS (KTLS) Offload**
+in QEMU virtualization workflows.
 
-QEMU is capable of emulating a complete machine in software without any
-need for hardware virtualization support. By using dynamic translation,
-it achieves very good performance. QEMU can also integrate with the Xen
-and KVM hypervisors to provide emulated hardware while allowing the
-hypervisor to manage the CPU. With hypervisor support, QEMU can achieve
-near native performance for CPUs. When QEMU emulates CPUs directly it is
-capable of running operating systems made for one machine (e.g. an ARMv7
-board) on a different machine (e.g. an x86_64 PC board).
-
-QEMU is also capable of providing userspace API virtualization for Linux
-and BSD kernel interfaces. This allows binaries compiled against one
-architecture ABI (e.g. the Linux PPC64 ABI) to be run on a host using a
-different architecture ABI (e.g. the Linux x86_64 ABI). This does not
-involve any hardware emulation, simply CPU and syscall emulation.
-
-QEMU aims to fit into a variety of use cases. It can be invoked directly
-by users wishing to have full control over its behaviour and settings.
-It also aims to facilitate integration into higher level management
-layers, by providing a stable command line interface and monitor API.
-It is commonly invoked indirectly via the libvirt library when using
-open source applications such as oVirt, OpenStack and virt-manager.
-
-QEMU as a whole is released under the GNU General Public License,
-version 2. For full licensing details, consult the LICENSE file.
+This fork introduces zero-copy kernel-space TLS cryptographic offload for QEMU's
+I/O channels, focusing on high-throughput live migration (including MultiFD and
+Post-Copy) over encrypted TCP connections.
 
 
-Documentation
-=============
+About Kernel TLS (KTLS) Offload
+===============================
 
-Documentation can be found hosted online at
-`<https://www.qemu.org/documentation/>`_. The documentation for the
-current development version that is available at
-`<https://www.qemu.org/docs/master/>`_ is generated from the ``docs/``
-folder in the source tree, and is built by `Sphinx
-<https://www.sphinx-doc.org/en/master/>`_.
+What is KTLS?
+-------------
+Standard TLS in QEMU is performed in userspace by GnuTLS. Every byte sent or
+received over TLS must be copied into userspace buffers, encrypted/decrypted on
+the host CPU cores, framed into TLS records, and copied back into kernel socket
+buffers. At multi-gigabit and 100GbE network speeds, this userspace cryptographic
+pipeline becomes a major CPU bottleneck.
+
+**Kernel TLS (KTLS)** offloads the symmetric encryption, decryption, and record
+framing directly into the Linux kernel network stack (via ``tls.ko``) or down to
+compatible network interface cards (NICs) supporting inline hardware TLS offload
+(e.g., NVIDIA/Mellanox ConnectX, Intel).
+
+How it Works in this Repository
+-------------------------------
+1. **Standard Handshake in Userspace**: GnuTLS executes the TLS handshake,
+   certificate validation, and session negotiation in userspace as normal.
+2. **Cryptographic State Export**: Once the handshake successfully completes,
+   QEMU queries the session parameters (ciphers, keys, IVs, sequence numbers)
+   from GnuTLS via ``gnutls_record_get_state()``.
+3. **Kernel Socket ULP Attachment**: QEMU attaches the ``tls`` Upper Layer
+   Protocol (ULP) to the connected TCP socket (``TCP_ULP``) and installs the
+   TX/RX crypto context using ``setsockopt(..., SOL_TLS, ...)``.
+4. **Zero-Copy Fast-Path**: Subsequent ``readv`` and ``writev`` operations on
+   ``QIOChannelTLS`` bypass userspace encryption/decryption routines entirely,
+   streaming data directly through the master socket.
+5. **Opportunistic Fallback**: If the socket is non-TCP (e.g. UNIX domain socket),
+   the kernel module is unavailable, or the cipher is unsupported, QEMU
+   transparently falls back to userspace GnuTLS. There is **no plaintext fallback**
+   under any circumstances.
+
+Supported Ciphers & Protocols:
+- **Protocols**: TLS 1.2, TLS 1.3
+- **Ciphers**: AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305
 
 
-Building
-========
+Operator Quickstart Guide
+=========================
 
-QEMU is multi-platform software intended to be buildable on all modern
-Linux platforms, OS-X, Win32 (via the Mingw64 toolchain) and a variety
-of other UNIX targets. The simple steps to build QEMU are:
+1. Host Prerequisites
+---------------------
+* **Linux Kernel**: Version 4.13 or newer (kernel >= 5.1 recommended for TLS 1.3).
+* **Kernel Module**: The ``tls`` kernel module must be loaded:
 
+  .. code-block:: shell
 
-.. code-block:: shell
+     sudo modprobe tls
 
-  mkdir build
-  cd build
-  ../configure
-  make
+  Verify that the module is active:
 
-Additional information can also be found online via the QEMU website:
+  .. code-block:: shell
 
-* `<https://wiki.qemu.org/Hosts/Linux>`_
-* `<https://wiki.qemu.org/Hosts/Mac>`_
-* `<https://wiki.qemu.org/Hosts/W32>`_
+     lsmod | grep tls
 
+* **Libraries**: GnuTLS development headers (``libgnutls28-dev`` on Debian/Ubuntu,
+  ``gnutls-devel`` on Fedora/RHEL).
 
-Submitting patches
-==================
-
-The QEMU source code is maintained under the GIT version control system.
-
-.. code-block:: shell
-
-   git clone https://gitlab.com/qemu-project/qemu.git
-
-When submitting patches, one common approach is to use 'git
-format-patch' and/or 'git send-email' to format & send the mail to the
-qemu-devel@nongnu.org mailing list. All patches submitted must contain
-a 'Signed-off-by' line from the author. Patches should follow the
-guidelines set out in the `style section
-<https://www.qemu.org/docs/master/devel/style.html>`_ of
-the Developers Guide.
-
-Additional information on submitting patches can be found online via
-the QEMU website:
-
-* `<https://wiki.qemu.org/Contribute/SubmitAPatch>`_
-* `<https://wiki.qemu.org/Contribute/TrivialPatches>`_
-
-The QEMU website is also maintained under source control.
+2. Building QEMU
+----------------
+Configure and build QEMU with GnuTLS support enabled:
 
 .. code-block:: shell
 
-  git clone https://gitlab.com/qemu-project/qemu-web.git
+   mkdir build && cd build
+   ../configure --target-list=x86_64-softmmu --enable-gnutls
+   ninja qemu-system-x86_64 tests/unit/test-io-channel-tls
 
-* `<https://www.qemu.org/2017/02/04/the-new-qemu-website-is-up/>`_
-
-A 'git-publish' utility was created to make above process less
-cumbersome, and is highly recommended for making regular contributions,
-or even just for sending consecutive patch series revisions. It also
-requires a working 'git send-email' setup, and by default doesn't
-automate everything, so you may want to go through the above steps
-manually for once.
-
-For installation instructions, please go to:
-
-*  `<https://github.com/stefanha/git-publish>`_
-
-The workflow with 'git-publish' is:
+3. Running Unit & Integration Tests
+-----------------------------------
+Verify that KTLS is functioning properly on your host kernel using the test suite:
 
 .. code-block:: shell
 
-  $ git checkout master -b my-feature
-  $ # work on new commits, add your 'Signed-off-by' lines to each
-  $ git publish
+   ./build/tests/unit/test-io-channel-tls
 
-Your patch series will be sent and tagged as my-feature-v1 if you need to refer
-back to it in the future.
+Expected output:
 
-Sending v2:
+.. code-block:: text
+
+   TAP version 14
+   1..3
+   # Start of qio tests
+   # Start of channel tests
+   # Start of tls tests
+   ok 1 /qio/channel/tls/basic
+   ok 2 /qio/channel/tls/ktls_tcp
+   ok 3 /qio/channel/tls/ktls_disabled
+   # End of tls tests
+   # End of channel tests
+   # End of qio tests
+
+
+Configuring & Using KTLS in Live Migration
+==========================================
+
+KTLS offload is enabled by default in QEMU migration whenever TLS credentials
+are configured.
+
+1. Defining TLS Credentials
+---------------------------
+Define standard QEMU x509 TLS certificate credentials on the QEMU command line:
 
 .. code-block:: shell
 
-  $ git checkout my-feature # same topic branch
-  $ # making changes to the commits (using 'git rebase', for example)
-  $ git publish
+   qemu-system-x86_64 ... \
+     -object tls-creds-x509,id=tls0,dir=/etc/pki/qemu,endpoint=client,verify-peer=yes
 
-Your patch series will be sent with 'v2' tag in the subject and the git tip
-will be tagged as my-feature-v2.
+2. Checking Migration Parameters via QMP
+----------------------------------------
+Query the migration parameters to inspect the status of ``tls-ktls``:
 
-Bug reporting
-=============
+.. code-block:: json
 
-The QEMU project uses GitLab issues to track bugs. Bugs
-found when running code built from QEMU git or upstream released sources
-should be reported via:
+   {"execute": "qmp_capabilities"}
+   {"execute": "query-migrate-parameters"}
 
-* `<https://gitlab.com/qemu-project/qemu/-/issues>`_
+Response will include:
 
-If using QEMU via an operating system vendor pre-built binary package, it
-is preferable to report bugs to the vendor's own bug tracker first. If
-the bug is also known to affect latest upstream code, it can also be
-reported via GitLab.
+.. code-block:: json
 
-For additional information on bug reporting consult:
+   {
+     "return": {
+       "tls-ktls": true,
+       "tls-creds": "tls0",
+       ...
+     }
+   }
 
-* `<https://wiki.qemu.org/Contribute/ReportABug>`_
+3. Toggling KTLS Offload at Runtime
+-----------------------------------
+To explicitly enable or disable KTLS offload via QMP:
+
+* **Disable KTLS (force userspace GnuTLS encryption)**:
+
+  .. code-block:: json
+
+     {"execute": "migrate-set-parameters", "arguments": {"tls-ktls": false}}
+
+* **Enable KTLS (opportunistic kernel offload)**:
+
+  .. code-block:: json
+
+     {"execute": "migrate-set-parameters", "arguments": {"tls-ktls": true}}
+
+4. MultiFD TLS Migration with KTLS
+----------------------------------
+Combine KTLS with MultiFD migration for maximum throughput across high-speed links:
+
+.. code-block:: json
+
+   {"execute": "migrate-set-capabilities", "arguments": {"capabilities": [{"capability": "multifd", "state": true}]}}
+   {"execute": "migrate-set-parameters", "arguments": {"multifd-channels": 8, "tls-creds": "tls0", "tls-ktls": true}}
+   {"execute": "migrate", "arguments": {"uri": "tcp:destination-host.example.com:49152"}}
 
 
-ChangeLog
-=========
+Observability and Diagnostics
+=============================
 
-For version history and release notes, please visit
-`<https://wiki.qemu.org/ChangeLog/>`_ or look at the git history for
-more detailed information.
+QEMU Tracing
+------------
+Monitor KTLS establishment and fast-path execution using QEMU trace points:
 
+.. code-block:: shell
 
-Contact
-=======
+   qemu-system-x86_64 ... \
+     -trace "qcrypto_tls_session_ktls*" \
+     -trace "qio_channel_tls_ktls*"
 
-The QEMU community can be contacted in a number of ways, with the two
-main methods being email and IRC:
+* ``qcrypto_tls_session_ktls_enable``: Emitted when keys are transferred and ``SOL_TLS`` succeeds.
+* ``qcrypto_tls_session_ktls_fail``: Emitted if KTLS setup fails and userspace fallback is triggered.
+* ``qio_channel_tls_ktls_setup``: Emitted when a TLS channel enables TX and/or RX offload.
+* ``qio_channel_tls_ktls_fastpath``: Emitted when data frames bypass userspace encryption.
 
-* `<mailto:qemu-devel@nongnu.org>`_
-* `<https://lists.nongnu.org/mailman/listinfo/qemu-devel>`_
-* #qemu on irc.oftc.net
+Kernel Socket Diagnostics
+-------------------------
+Inspect active TCP sockets on the Linux host to verify that the TLS ULP is attached:
 
-Information on additional methods of contacting the community can be
-found online via the QEMU website:
+.. code-block:: shell
 
-* `<https://wiki.qemu.org/Contribute/StartHere>`_
+   ss -t --ulp
+
+Check host-wide KTLS packet and byte counters:
+
+.. code-block:: shell
+
+   nstat -a | grep -i tls
+   cat /proc/net/tls_stat
